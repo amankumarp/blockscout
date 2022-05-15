@@ -20,6 +20,7 @@ defmodule Indexer.Fetcher.BlockReward do
   alias Explorer.Chain.Cache.Accounts
   alias Indexer.{BufferedTask, Tracer}
   alias Indexer.Fetcher.BlockReward.Supervisor, as: BlockRewardSupervisor
+  alias Indexer.Block.Fetcher, as: BlockFetcher
   alias Indexer.Fetcher.CoinBalance
   alias Indexer.Transform.{AddressCoinBalances, AddressCoinBalancesDaily, Addresses}
 
@@ -76,7 +77,7 @@ defmodule Indexer.Fetcher.BlockReward do
 
   @impl BufferedTask
   @decorate trace(name: "fetch", resource: "Indexer.Fetcher.BlockReward.run/2", service: :indexer, tracer: Tracer)
-  def run(entries, json_rpc_named_arguments) do
+  def run(entries, _json_rpc_named_arguments) do
     hash_string_by_number =
       entries
       |> Enum.uniq()
@@ -91,7 +92,7 @@ defmodule Indexer.Fetcher.BlockReward do
     Logger.debug(fn -> "fetching" end)
 
     consensus_numbers
-    |> EthereumJSONRPC.fetch_beneficiaries(json_rpc_named_arguments)
+    |> BlockFetcher.fetch_beneficiaries()
     |> case do
       {:ok, fetched_beneficiaries} ->
         run_fetched_beneficiaries(fetched_beneficiaries, hash_string_by_number)
@@ -128,7 +129,6 @@ defmodule Indexer.Fetcher.BlockReward do
 
       beneficiaries_params ->
         beneficiaries_params
-        |> add_gas_payments()
         |> add_timestamp()
         |> import_block_reward_params()
         |> case do

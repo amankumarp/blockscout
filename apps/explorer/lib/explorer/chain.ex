@@ -77,7 +77,7 @@ defmodule Explorer.Chain do
 
   alias Explorer.Chain.Import.Runner
   alias Explorer.Chain.InternalTransaction.{CallType, Type}
-  alias Explorer.Counters.{AddressesCounter, AddressesWithBalanceCounter}
+  alias Explorer.Counters.{AddressesCounter, AddressesWithBalanceCounter, BlockBurnedFeeCounter}
   alias Explorer.Market.MarketHistoryCache
   alias Explorer.{PagingOptions, Repo}
   alias Explorer.SmartContract.{Helper, Reader}
@@ -798,6 +798,51 @@ defmodule Explorer.Chain do
       other_value ->
         other_value
     end
+  end
+
+  @uncle_reward_coef 1 / 32
+  def block_reward_by_parts(block_number) do
+    %{
+      hash: hash,
+      base_fee_per_gas: base_fee_per_gas,
+      txn_fees: txn_fees,
+      static_reward: static_reward
+    } =
+      Repo.one!(
+        from(block in Explorer.Chain.Block,
+          left_join: transaction in assoc(block, :transactions),
+          inner_join: emission_reward in Explorer.Chain.Block.EmissionReward,
+          on: fragment("? <@ ?", block.number, emission_reward.block_range),
+          where: block.number == ^block_number and block.consensus,
+          group_by: [emission_reward.reward, block.hash],
+          select: %{
+            hash: block.hash,
+            base_fee_per_gas: block.base_fee_per_gas,
+            txn_fees: coalesce(sum(transaction.gas_used * transaction.gas_price), 0),
+            static_reward: emission_reward.reward
+          }
+        )
+      )
+
+    has_uncles? =
+      Repo.exists?(
+        from(
+          sdr in Block.SecondDegreeRelation,
+          where: sdr.nephew_hash == ^hash
+        )
+      )
+
+    burned_fee = base_fee_per_gas && Wei.mult(base_fee_per_gas, BlockBurnedFeeCounter.fetch(hash))
+    uncle_reward = has_uncles? && Wei.mult(static_reward, Decimal.from_float(@uncle_reward_coef)) || nil
+
+    %{
+      block_number: block_number,
+      block_hash: hash,
+      static_reward: static_reward,
+      txn_fees: %Wei{value: txn_fees},
+      burned_fees: burned_fee,
+      uncle_reward: uncle_reward
+    }
   end
 
   @doc """

@@ -11,7 +11,7 @@ defmodule Indexer.Block.Fetcher do
 
   alias EthereumJSONRPC.{Blocks, FetchedBeneficiaries}
   alias Explorer.Chain
-  alias Explorer.Chain.{Address, Block, Hash, Import, Transaction}
+  alias Explorer.Chain.{Address, Block, Hash, Import, Transaction, Wei}
   alias Explorer.Chain.Block.Reward
   alias Explorer.Chain.Cache.Blocks, as: BlocksCache
   alias Explorer.Chain.Cache.{Accounts, BlockNumber, Transactions, Uncles}
@@ -136,7 +136,7 @@ defmodule Indexer.Block.Fetcher do
          %{token_transfers: token_transfers, tokens: tokens} = TokenTransfers.parse(logs),
          %{mint_transfers: mint_transfers} = MintTransfers.parse(logs),
          %FetchedBeneficiaries{params_set: beneficiary_params_set, errors: beneficiaries_errors} =
-           fetch_beneficiaries(blocks, json_rpc_named_arguments),
+           fetch_beneficiaries(blocks),
          addresses =
            Addresses.extract_addresses(%{
              block_reward_contract_beneficiaries: MapSet.to_list(beneficiary_params_set),
@@ -336,40 +336,52 @@ defmodule Indexer.Block.Fetcher do
     quantity_to_integer(block_quantity)
   end
 
-  defp fetch_beneficiaries(blocks, json_rpc_named_arguments) do
-    hash_string_by_number =
-      Enum.into(blocks, %{}, fn %{number: number, hash: hash_string}
-                                when is_integer(number) and is_binary(hash_string) ->
-        {number, hash_string}
-      end)
+  def fetch_beneficiaries(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.map(&fetch_beneficiaries/1)
+    |> Enum.reduce(%FetchedBeneficiaries{}, fn params_set, %{params_set: acc_params_set} = acc ->
+      %FetchedBeneficiaries{acc | params_set: MapSet.union(acc_params_set, params_set)}
+    end)
+  end
 
-    hash_string_by_number
-    |> Map.keys()
-    |> EthereumJSONRPC.fetch_beneficiaries(json_rpc_named_arguments)
-    |> case do
-      {:ok, %FetchedBeneficiaries{params_set: params_set} = fetched_beneficiaries} ->
-        consensus_params_set = consensus_params_set(params_set, hash_string_by_number)
+  def fetch_beneficiaries(%{number: block_number}) do
+    fetch_beneficiaries(block_number)
+  end
 
-        %FetchedBeneficiaries{fetched_beneficiaries | params_set: consensus_params_set}
+  def fetch_beneficiaries(block_number) when is_integer(block_number) do
+    block_number
+    |> Chain.block_reward_by_parts()
+    |> reward_parts_to_beneficiaries()
+  end
 
-      {:error, reason} ->
-        Logger.error(fn -> ["Could not fetch beneficiaries: ", inspect(reason)] end)
+  defp reward_parts_to_beneficiaries(reward_parts) do
+    default_rewards_set =
+      MapSet.new([
+        %{
+          # TODO: fetch address_hash
+          address_hash: "",
+          block_hash: reward_parts.block_hash,
+          block_number: reward_parts.block_number,
+          reward: reward_parts.static_reward |> Wei.sum(reward_parts.txn_fees) |> Wei.sub(reward_parts.burned_fees),
+          address_type: :validator
+        }
+      ])
 
-        error =
-          case reason do
-            %{code: code, message: message} -> %{code: code, message: message}
-            _ -> %{code: -1, message: inspect(reason)}
-          end
+    case reward_parts.uncle_reward do
+      nil ->
+        default_rewards_set
 
-        errors =
-          Enum.map(hash_string_by_number, fn {number, _} when is_integer(number) ->
-            Map.put(error, :data, %{block_number: number})
-          end)
-
-        %FetchedBeneficiaries{errors: errors}
-
-      :ignore ->
-        %FetchedBeneficiaries{}
+      reward ->
+        MapSet.put(
+          default_rewards_set,
+          %{
+            # TODO: fetch address_hash
+            address_hash: "",
+            block_hash: reward_parts.block_hash,
+            block_number: reward_parts.block_number,
+            reward: reward,
+            address_type: :uncle
+          })
     end
   end
 
